@@ -21,6 +21,11 @@ else
     exit 1
 fi
 
+# Load local configuration overrides if available
+if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    source "$BACKUP_SYSTEM_DIR/.env.local"
+fi
+
 # Script variables
 BACKUP_TYPE=${1:-daily}
 DATE=$(date +%Y%m%d_%H%M%S)

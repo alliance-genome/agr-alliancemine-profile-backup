@@ -19,6 +19,11 @@ else
     exit 1
 fi
 
+# Load local configuration overrides if available
+if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    source "$BACKUP_SYSTEM_DIR/.env.local"
+fi
+
 # S3 settings (optional)
 S3_BUCKET=${S3_BUCKET:-""}
 S3_PREFIX=${S3_PREFIX:-""}

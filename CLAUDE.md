@@ -40,6 +40,11 @@ Key design patterns:
 - Optional variables: `DAILY_RETENTION_DAYS`, `WEEKLY_RETENTION_DAYS`, `BACKUP_COMPRESSION_LEVEL`
 - S3 variables (optional): `S3_BUCKET`, `S3_PREFIX`, `S3_STORAGE_CLASS`, `S3_REGION`, `S3_ENDPOINT`, `KEEP_LOCAL_BACKUPS`
 
+### Secure S3 Configuration
+For security, avoid storing S3 bucket details in the repository:
+- **Option 1**: Use environment variables: `export S3_BUCKET="your-bucket"` 
+- **Option 2**: Create `.env.local` file with S3 settings (automatically sourced, ignored by git)
+
 ### S3 Integration
 When `S3_BUCKET` is configured, the system will:
 - Upload backups to S3 after successful local creation and verification
