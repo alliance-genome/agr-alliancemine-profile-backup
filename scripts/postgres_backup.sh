@@ -1,0 +1,440 @@
+#!/bin/bash
+
+# PostgreSQL Automated Backup System - Main Script
+# Usage: ./postgres_backup.sh [daily|weekly]
+# This script is part of an organized backup system
+
+set -e  # Exit on any error
+
+# Get script directory and setup paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP_SYSTEM_DIR="$(dirname "$SCRIPT_DIR")"
+CONFIG_DIR="$BACKUP_SYSTEM_DIR/config"
+BACKUP_DATA_DIR="$BACKUP_SYSTEM_DIR/backups"
+
+# Load configuration
+if [ -f "$CONFIG_DIR/backup_config.env" ]; then
+    source "$CONFIG_DIR/backup_config.env"
+else
+    echo "Error: Configuration file not found at $CONFIG_DIR/backup_config.env"
+    echo "Please run the setup script first or create the configuration file."
+    exit 1
+fi
+
+# Script variables
+BACKUP_TYPE=${1:-daily}
+DATE=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="$BACKUP_DATA_DIR/logs/backup.log"
+
+# Retention settings (can be overridden in config)
+DAILY_RETENTION_DAYS=${DAILY_RETENTION_DAYS:-7}
+WEEKLY_RETENTION_DAYS=${WEEKLY_RETENTION_DAYS:-90}
+BACKUP_COMPRESSION_LEVEL=${BACKUP_COMPRESSION_LEVEL:-9}
+CONNECTION_TIMEOUT=${CONNECTION_TIMEOUT:-10}
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log() {
+    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+error() {
+    echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')] ERROR:${NC} $1" | tee -a "$LOG_FILE"
+}
+
+warning() {
+    echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')] WARNING:${NC} $1" | tee -a "$LOG_FILE"
+}
+
+info() {
+    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] INFO:${NC} $1" | tee -a "$LOG_FILE"
+}
+
+# System information
+show_system_info() {
+    log "=== SYSTEM INFORMATION ==="
+    info "Backup System Directory: $BACKUP_SYSTEM_DIR"
+    info "Backup Type: $BACKUP_TYPE"
+    info "Target Database: $DB_NAME on $DB_HOST"
+    info "Retention Policy: Daily($DAILY_RETENTION_DAYS days), Weekly($WEEKLY_RETENTION_DAYS days)"
+    info "Compression Level: $BACKUP_COMPRESSION_LEVEL"
+    log "=========================="
+}
+
+# Validate input parameters
+validate_input() {
+    if [[ "$BACKUP_TYPE" != "daily" && "$BACKUP_TYPE" != "weekly" ]]; then
+        error "Invalid backup type: $BACKUP_TYPE"
+        echo "Usage: $0 [daily|weekly]"
+        echo ""
+        echo "Examples:"
+        echo "  $0 daily   # Create daily backup"
+        echo "  $0 weekly  # Create weekly backup"
+        exit 1
+    fi
+}
+
+# Check required configuration
+validate_configuration() {
+    local missing_config=false
+    
+    if [ -z "$DB_HOST" ]; then
+        error "DB_HOST not configured"
+        missing_config=true
+    fi
+    
+    if [ -z "$DB_NAME" ]; then
+        error "DB_NAME not configured"
+        missing_config=true
+    fi
+    
+    if [ -z "$DB_USER" ]; then
+        error "DB_USER not configured"
+        missing_config=true
+    fi
+    
+    if [ "$missing_config" = true ]; then
+        error "Missing required configuration. Please check $CONFIG_DIR/backup_config.env"
+        exit 1
+    fi
+    
+    log "Configuration validation passed"
+}
+
+# Check system dependencies
+check_dependencies() {
+    log "Checking system dependencies..."
+    
+    local missing_deps=false
+    
+    if ! command -v pg_dump &> /dev/null; then
+        error "pg_dump not found. Please install PostgreSQL client tools."
+        missing_deps=true
+    fi
+    
+    if ! command -v pg_isready &> /dev/null; then
+        error "pg_isready not found. Please install PostgreSQL client tools."
+        missing_deps=true
+    fi
+    
+    if ! command -v gzip &> /dev/null; then
+        error "gzip not found."
+        missing_deps=true
+    fi
+    
+    if [ "$missing_deps" = true ]; then
+        error "Missing required dependencies. Please install them and try again."
+        exit 1
+    fi
+    
+    log "All dependencies satisfied"
+}
+
+# Test database connection
+test_connection() {
+    log "Testing database connection..."
+    
+    info "Connecting to $DB_HOST as $DB_USER..."
+    
+    if pg_isready -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t "$CONNECTION_TIMEOUT"; then
+        log "Database connection successful"
+        
+        # Get database size for planning
+        local db_size=$(psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT pg_size_pretty(pg_database_size('$DB_NAME'))" 2>/dev/null || echo "Unknown")
+        info "Database size: $db_size"
+    else
+        error "Cannot connect to database. Please check:"
+        error "  1. Database host and credentials in $CONFIG_DIR/backup_config.env"
+        error "  2. Network connectivity to $DB_HOST"
+        error "  3. PostgreSQL authentication (consider using ~/.pgpass)"
+        exit 1
+    fi
+}
+
+# Create backup directory if needed
+ensure_directories() {
+    local backup_dir="$BACKUP_DATA_DIR/$BACKUP_TYPE"
+    
+    if [ ! -d "$backup_dir" ]; then
+        log "Creating backup directory: $backup_dir"
+        mkdir -p "$backup_dir"
+    fi
+    
+    if [ ! -d "$BACKUP_DATA_DIR/logs" ]; then
+        mkdir -p "$BACKUP_DATA_DIR/logs"
+    fi
+}
+
+# Create the actual backup
+create_backup() {
+    local backup_dir="$BACKUP_DATA_DIR/$BACKUP_TYPE"
+    local backup_filename="postgres_${BACKUP_TYPE}_${DATE}.sql.gz"
+    local backup_path="$backup_dir/$backup_filename"
+    local temp_backup="/tmp/postgres_backup_${BACKUP_TYPE}_${DATE}.sql"
+    
+    log "Starting $BACKUP_TYPE backup creation..."
+    info "Target file: $backup_filename"
+    
+    # Check available disk space
+    local available_space=$(df "$backup_dir" | tail -1 | awk '{print $4}')
+    info "Available disk space: $(echo $available_space | awk '{print int($1/1024/1024)" GB"}')"
+    
+    # Create backup with error handling
+    local start_time=$(date +%s)
+    
+    if pg_dump -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
+        --no-password \
+        --verbose \
+        --format=custom \
+        --compress="$BACKUP_COMPRESSION_LEVEL" \
+        --file="$temp_backup" 2>> "$LOG_FILE"; then
+        
+        # Compress the backup
+        info "Compressing backup file..."
+        if gzip -"$BACKUP_COMPRESSION_LEVEL" "$temp_backup"; then
+            mv "${temp_backup}.gz" "$backup_path"
+        else
+            error "Failed to compress backup file"
+            rm -f "$temp_backup" 2>/dev/null
+            exit 1
+        fi
+        
+        # Calculate backup time and size
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        local file_size=$(du -h "$backup_path" | cut -f1)
+        
+        log "Backup completed successfully!"
+        info "Backup file: $backup_filename"
+        info "File size: $file_size"
+        info "Duration: ${duration} seconds"
+        
+        # Verify backup integrity
+        if verify_backup_integrity "$backup_path"; then
+            log "Backup integrity verification passed"
+        else
+            error "Backup integrity verification failed!"
+            exit 1
+        fi
+        
+        # Send notifications if configured
+        send_notifications "success" "$backup_filename" "$file_size" "$duration"
+        
+    else
+        error "Backup creation failed!"
+        rm -f "$temp_backup" 2>/dev/null
+        send_notifications "failure" "$backup_filename" "" ""
+        exit 1
+    fi
+}
+
+# Verify backup file integrity
+verify_backup_integrity() {
+    local backup_file="$1"
+    
+    info "Verifying backup integrity..."
+    
+    # Test gzip integrity
+    if ! gzip -t "$backup_file"; then
+        error "Backup file is corrupted (gzip test failed)"
+        return 1
+    fi
+    
+    # Test PostgreSQL backup format
+    if ! pg_restore --list "$backup_file" >/dev/null 2>&1; then
+        error "Backup file is corrupted (pg_restore test failed)"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Clean old backups based on retention policy
+cleanup_old_backups() {
+    log "Starting cleanup process..."
+    
+    # Clean daily backups
+    local daily_dir="$BACKUP_DATA_DIR/daily"
+    if [ -d "$daily_dir" ]; then
+        local daily_files=$(find "$daily_dir" -name "postgres_daily_*.sql.gz" -mtime +$DAILY_RETENTION_DAYS 2>/dev/null)
+        local daily_count=$(echo "$daily_files" | grep -c . 2>/dev/null || echo 0)
+        
+        if [ "$daily_count" -gt 0 ]; then
+            info "Removing $daily_count daily backup(s) older than $DAILY_RETENTION_DAYS days..."
+            echo "$daily_files" | xargs rm -f
+            log "Daily backup cleanup completed"
+        else
+            info "No daily backups require cleanup"
+        fi
+    fi
+    
+    # Clean weekly backups
+    local weekly_dir="$BACKUP_DATA_DIR/weekly"
+    if [ -d "$weekly_dir" ]; then
+        local weekly_files=$(find "$weekly_dir" -name "postgres_weekly_*.sql.gz" -mtime +$WEEKLY_RETENTION_DAYS 2>/dev/null)
+        local weekly_count=$(echo "$weekly_files" | grep -c . 2>/dev/null || echo 0)
+        
+        if [ "$weekly_count" -gt 0 ]; then
+            info "Removing $weekly_count weekly backup(s) older than $WEEKLY_RETENTION_DAYS days..."
+            echo "$weekly_files" | xargs rm -f
+            log "Weekly backup cleanup completed"
+        else
+            info "No weekly backups require cleanup"
+        fi
+    fi
+    
+    # Clean old log files (keep last 30 days)
+    local old_logs=$(find "$BACKUP_DATA_DIR/logs" -name "*.log" -mtime +30 2>/dev/null)
+    if [ -n "$old_logs" ]; then
+        info "Cleaning old log files..."
+        echo "$old_logs" | xargs rm -f
+    fi
+}
+
+# Generate backup report
+generate_report() {
+    log "Generating backup report..."
+    
+    echo "=== BACKUP REPORT ===" >> "$LOG_FILE"
+    echo "Date: $(date)" >> "$LOG_FILE"
+    echo "Type: $BACKUP_TYPE" >> "$LOG_FILE"
+    echo "System: $BACKUP_SYSTEM_DIR" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
+    
+    # Count and size of backups by type
+    for type in daily weekly; do
+        local dir="$BACKUP_DATA_DIR/$type"
+        if [ -d "$dir" ]; then
+            local count=$(find "$dir" -name "postgres_${type}_*.sql.gz" 2>/dev/null | wc -l)
+            local total_size=$(du -sh "$dir" 2>/dev/null | cut -f1 || echo "0B")
+            echo "$type backups: $count files, $total_size total" >> "$LOG_FILE"
+        fi
+    done
+    
+    # Overall system size
+    local system_size=$(du -sh "$BACKUP_DATA_DIR" 2>/dev/null | cut -f1 || echo "0B")
+    echo "Total backup system size: $system_size" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
+}
+
+# Send notifications (if configured)
+send_notifications() {
+    local status="$1"
+    local filename="$2"
+    local filesize="$3"
+    local duration="$4"
+    
+    local message=""
+    if [ "$status" = "success" ]; then
+        message="✅ PostgreSQL $BACKUP_TYPE backup completed successfully!\nFile: $filename ($filesize)\nDuration: ${duration}s\nDatabase: $DB_NAME on $DB_HOST"
+    else
+        message="❌ PostgreSQL $BACKUP_TYPE backup FAILED!\nDatabase: $DB_NAME on $DB_HOST\nCheck logs: $LOG_FILE"
+    fi
+    
+    # Slack notification
+    if [ -n "$SLACK_WEBHOOK_URL" ]; then
+        curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$message\"}" \
+            "$SLACK_WEBHOOK_URL" 2>/dev/null || true
+    fi
+    
+    # Email notification
+    if [ -n "$EMAIL_RECIPIENT" ] && command -v mail &> /dev/null; then
+        echo -e "$message" | mail -s "PostgreSQL Backup $status - $BACKUP_TYPE" "$EMAIL_RECIPIENT" 2>/dev/null || true
+    fi
+}
+
+# Main execution function
+main() {
+    # Initial setup
+    validate_input
+    show_system_info
+    validate_configuration
+    ensure_directories
+    
+    # Pre-backup checks
+    check_dependencies
+    test_connection
+    
+    # Execute backup
+    create_backup
+    
+    # Post-backup tasks
+    cleanup_old_backups
+    generate_report
+    
+    log "=== Backup process completed successfully ==="
+    
+    # Final status summary
+    local total_backups=$(find "$BACKUP_DATA_DIR" -name "postgres_*.sql.gz" | wc -l)
+    local total_size=$(du -sh "$BACKUP_DATA_DIR" | cut -f1)
+    info "Total backups in system: $total_backups files ($total_size)"
+    
+    return 0
+}
+
+# Error handling and cleanup
+cleanup_on_exit() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        error "Backup process failed with exit code $exit_code"
+        # Cleanup any temporary files
+        rm -f /tmp/postgres_backup_${BACKUP_TYPE}_*.sql 2>/dev/null || true
+    fi
+    exit $exit_code
+}
+
+# Set up error handling
+trap cleanup_on_exit EXIT
+trap 'error "Backup process interrupted"; exit 1' INT TERM
+
+# Help function
+show_help() {
+    echo "PostgreSQL Automated Backup System"
+    echo ""
+    echo "Usage: $0 [daily|weekly] [options]"
+    echo ""
+    echo "Backup Types:"
+    echo "  daily   Create daily backup (retained for $DAILY_RETENTION_DAYS days)"
+    echo "  weekly  Create weekly backup (retained for $WEEKLY_RETENTION_DAYS days)"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help     Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0 daily       # Create daily backup"
+    echo "  $0 weekly      # Create weekly backup"
+    echo ""
+    echo "Configuration:"
+    echo "  Config file: $CONFIG_DIR/backup_config.env"
+    echo "  Backup storage: $BACKUP_DATA_DIR"
+    echo "  Logs: $BACKUP_DATA_DIR/logs/"
+    echo ""
+    echo "Related Commands:"
+    echo "  $(dirname "$0")/backup_status.sh     # Check backup status"
+    echo "  $(dirname "$0")/postgres_restore.sh  # Restore from backup"
+    echo "  $(dirname "$0")/test_backup.sh       # Test backup system"
+}
+
+# Handle command line arguments
+case "${1:-}" in
+    -h|--help)
+        show_help
+        exit 0
+        ;;
+    "")
+        # Default to daily if no argument provided
+        set -- "daily"
+        ;;
+esac
+
+# Run if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
