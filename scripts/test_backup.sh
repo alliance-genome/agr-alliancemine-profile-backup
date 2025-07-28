@@ -17,6 +17,12 @@ else
     exit 1
 fi
 
+# S3 settings (optional)
+S3_BUCKET=${S3_BUCKET:-""}
+S3_PREFIX=${S3_PREFIX:-""}
+S3_REGION=${S3_REGION:-""}
+S3_ENDPOINT=${S3_ENDPOINT:-""}
+
 TEST_DB="backup_test_$(date +%Y%m%d_%H%M%S)"
 
 echo "=== Backup System Test ==="
@@ -87,4 +93,65 @@ else
 fi
 
 echo
+
+# Test S3 functionality if configured
+if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
+    echo "🧪 Test 5: Testing S3 functionality..."
+    
+    # Build S3 path for the latest backup
+    local s3_base="s3://$S3_BUCKET"
+    if [ -n "$S3_PREFIX" ]; then
+        s3_base="$s3_base/$S3_PREFIX"
+    fi
+    local s3_backup_path="$s3_base/daily/$(basename "$LATEST_BACKUP")"
+    
+    # Build AWS CLI command
+    local aws_cmd="aws s3 ls \"$s3_backup_path\""
+    if [ -n "$S3_REGION" ]; then
+        aws_cmd="$aws_cmd --region $S3_REGION"
+    fi
+    if [ -n "$S3_ENDPOINT" ]; then
+        aws_cmd="$aws_cmd --endpoint-url $S3_ENDPOINT"
+    fi
+    
+    # Check if backup exists in S3
+    if eval "$aws_cmd" >/dev/null 2>&1; then
+        echo "✅ S3 backup verification: PASSED"
+        echo "   Backup found in S3: $(basename "$LATEST_BACKUP")"
+        
+        # Optional: Test S3 download
+        read -p "Test S3 download? This will download the backup to verify it works (y/N): " test_download
+        if [[ $test_download == [yY] ]]; then
+            local temp_download="/tmp/s3_test_$(basename "$LATEST_BACKUP")"
+            
+            local download_cmd="aws s3 cp \"$s3_backup_path\" \"$temp_download\""
+            if [ -n "$S3_REGION" ]; then
+                download_cmd="$download_cmd --region $S3_REGION"
+            fi
+            if [ -n "$S3_ENDPOINT" ]; then
+                download_cmd="$download_cmd --endpoint-url $S3_ENDPOINT"
+            fi
+            
+            if eval "$download_cmd" >/dev/null 2>&1; then
+                echo "✅ S3 download test: PASSED"
+                rm -f "$temp_download"
+            else
+                echo "❌ S3 download test: FAILED"
+                exit 1
+            fi
+        else
+            echo "⏭️  S3 download test skipped"
+        fi
+    else
+        echo "❌ S3 backup verification: FAILED"
+        echo "   Backup not found in S3 or S3 access failed"
+        exit 1
+    fi
+    
+    echo
+elif [ -n "$S3_BUCKET" ]; then
+    echo "⚠️  S3 configured but AWS CLI not available - S3 tests skipped"
+    echo
+fi
+
 echo "🎉 All tests passed! Backup system is working correctly."

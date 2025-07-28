@@ -32,6 +32,14 @@ WEEKLY_RETENTION_DAYS=${WEEKLY_RETENTION_DAYS:-90}
 BACKUP_COMPRESSION_LEVEL=${BACKUP_COMPRESSION_LEVEL:-9}
 CONNECTION_TIMEOUT=${CONNECTION_TIMEOUT:-10}
 
+# S3 settings (optional)
+S3_BUCKET=${S3_BUCKET:-""}
+S3_PREFIX=${S3_PREFIX:-""}
+S3_STORAGE_CLASS=${S3_STORAGE_CLASS:-"STANDARD"}
+S3_REGION=${S3_REGION:-""}
+S3_ENDPOINT=${S3_ENDPOINT:-""}
+KEEP_LOCAL_BACKUPS=${KEEP_LOCAL_BACKUPS:-"true"}
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -126,6 +134,16 @@ check_dependencies() {
     if ! command -v gzip &> /dev/null; then
         error "gzip not found."
         missing_deps=true
+    fi
+    
+    # Check AWS CLI if S3 is configured
+    if [ -n "$S3_BUCKET" ]; then
+        if ! command -v aws &> /dev/null; then
+            error "AWS CLI not found but S3_BUCKET is configured. Please install AWS CLI."
+            missing_deps=true
+        else
+            info "AWS CLI found - S3 uploads enabled"
+        fi
     fi
     
     if [ "$missing_deps" = true ]; then
@@ -223,6 +241,12 @@ create_backup() {
             exit 1
         fi
         
+        # Upload to S3 if configured
+        if ! upload_to_s3 "$backup_path"; then
+            error "S3 upload failed, but local backup is available"
+            # Don't exit - local backup is still valid
+        fi
+        
         # Send notifications if configured
         send_notifications "success" "$backup_filename" "$file_size" "$duration"
         
@@ -253,6 +277,175 @@ verify_backup_integrity() {
     fi
     
     return 0
+}
+
+# Upload backup to S3
+upload_to_s3() {
+    local backup_file="$1"
+    local backup_filename="$(basename "$backup_file")"
+    
+    if [ -z "$S3_BUCKET" ]; then
+        info "S3_BUCKET not configured - skipping S3 upload"
+        return 0
+    fi
+    
+    log "Uploading backup to S3..."
+    info "S3 Bucket: $S3_BUCKET"
+    info "File: $backup_filename"
+    
+    # Build S3 path
+    local s3_path="s3://$S3_BUCKET"
+    if [ -n "$S3_PREFIX" ]; then
+        s3_path="$s3_path/$S3_PREFIX"
+    fi
+    s3_path="$s3_path/$BACKUP_TYPE/$backup_filename"
+    
+    info "S3 destination: $s3_path"
+    
+    # Build AWS CLI command
+    local aws_cmd="aws s3 cp \"$backup_file\" \"$s3_path\" --storage-class $S3_STORAGE_CLASS"
+    
+    # Add region if specified
+    if [ -n "$S3_REGION" ]; then
+        aws_cmd="$aws_cmd --region $S3_REGION"
+    fi
+    
+    # Add custom endpoint if specified
+    if [ -n "$S3_ENDPOINT" ]; then
+        aws_cmd="$aws_cmd --endpoint-url $S3_ENDPOINT"
+    fi
+    
+    # Execute upload with progress
+    local upload_start_time=$(date +%s)
+    
+    if eval "$aws_cmd"; then
+        local upload_end_time=$(date +%s)
+        local upload_duration=$((upload_end_time - upload_start_time))
+        
+        log "S3 upload completed successfully!"
+        info "Upload duration: ${upload_duration} seconds"
+        
+        # Verify S3 upload
+        if verify_s3_upload "$s3_path" "$backup_file"; then
+            log "S3 upload verification passed"
+            
+            # Remove local backup if configured
+            if [ "$KEEP_LOCAL_BACKUPS" = "false" ]; then
+                info "Removing local backup file (KEEP_LOCAL_BACKUPS=false)..."
+                rm -f "$backup_file"
+                log "Local backup file removed"
+            fi
+        else
+            error "S3 upload verification failed!"
+            return 1
+        fi
+    else
+        error "S3 upload failed!"
+        return 1
+    fi
+}
+
+# Verify S3 upload integrity
+verify_s3_upload() {
+    local s3_path="$1"
+    local local_file="$2"
+    
+    info "Verifying S3 upload integrity..."
+    
+    # Get local file size
+    local local_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null)
+    
+    # Get S3 file size
+    local aws_ls_cmd="aws s3 ls \"$s3_path\""
+    if [ -n "$S3_REGION" ]; then
+        aws_ls_cmd="$aws_ls_cmd --region $S3_REGION"
+    fi
+    if [ -n "$S3_ENDPOINT" ]; then
+        aws_ls_cmd="$aws_ls_cmd --endpoint-url $S3_ENDPOINT"
+    fi
+    
+    local s3_size=$(eval "$aws_ls_cmd" | awk '{print $3}')
+    
+    if [ -n "$s3_size" ] && [ "$local_size" = "$s3_size" ]; then
+        return 0
+    else
+        error "Size mismatch - Local: $local_size bytes, S3: $s3_size bytes"
+        return 1
+    fi
+}
+
+# Clean old S3 backups based on retention policy
+cleanup_s3_backups() {
+    if [ -z "$S3_BUCKET" ]; then
+        return 0
+    fi
+    
+    log "Starting S3 cleanup process..."
+    
+    # Build base S3 path
+    local s3_base="s3://$S3_BUCKET"
+    if [ -n "$S3_PREFIX" ]; then
+        s3_base="$s3_base/$S3_PREFIX"
+    fi
+    
+    # Build AWS CLI command base
+    local aws_base_cmd="aws s3 ls"
+    if [ -n "$S3_REGION" ]; then
+        aws_base_cmd="$aws_base_cmd --region $S3_REGION"
+    fi
+    if [ -n "$S3_ENDPOINT" ]; then
+        aws_base_cmd="$aws_base_cmd --endpoint-url $S3_ENDPOINT"
+    fi
+    
+    # Clean daily backups from S3
+    local daily_cutoff_date=$(date -d "$DAILY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-${DAILY_RETENTION_DAYS}d +%Y%m%d 2>/dev/null)
+    if [ -n "$daily_cutoff_date" ]; then
+        info "Cleaning S3 daily backups older than $daily_cutoff_date..."
+        local daily_s3_path="$s3_base/daily/"
+        
+        # List and filter old daily backups
+        eval "$aws_base_cmd \"$daily_s3_path\"" | awk '{if ($4 ~ /postgres_daily_/) print $4}' | while read -r filename; do
+            if [[ "$filename" =~ postgres_daily_([0-9]{8})_ ]]; then
+                local file_date="${BASH_REMATCH[1]}"
+                if [ "$file_date" -lt "$daily_cutoff_date" ]; then
+                    info "Removing old S3 daily backup: $filename"
+                    local aws_rm_cmd="aws s3 rm \"$daily_s3_path$filename\""
+                    if [ -n "$S3_REGION" ]; then
+                        aws_rm_cmd="$aws_rm_cmd --region $S3_REGION"
+                    fi
+                    if [ -n "$S3_ENDPOINT" ]; then
+                        aws_rm_cmd="$aws_rm_cmd --endpoint-url $S3_ENDPOINT"
+                    fi
+                    eval "$aws_rm_cmd"
+                fi
+            fi
+        done
+    fi
+    
+    # Clean weekly backups from S3
+    local weekly_cutoff_date=$(date -d "$WEEKLY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-${WEEKLY_RETENTION_DAYS}d +%Y%m%d 2>/dev/null)
+    if [ -n "$weekly_cutoff_date" ]; then
+        info "Cleaning S3 weekly backups older than $weekly_cutoff_date..."
+        local weekly_s3_path="$s3_base/weekly/"
+        
+        # List and filter old weekly backups
+        eval "$aws_base_cmd \"$weekly_s3_path\"" | awk '{if ($4 ~ /postgres_weekly_/) print $4}' | while read -r filename; do
+            if [[ "$filename" =~ postgres_weekly_([0-9]{8})_ ]]; then
+                local file_date="${BASH_REMATCH[1]}"
+                if [ "$file_date" -lt "$weekly_cutoff_date" ]; then
+                    info "Removing old S3 weekly backup: $filename"
+                    local aws_rm_cmd="aws s3 rm \"$weekly_s3_path$filename\""
+                    if [ -n "$S3_REGION" ]; then
+                        aws_rm_cmd="$aws_rm_cmd --region $S3_REGION"
+                    fi
+                    if [ -n "$S3_ENDPOINT" ]; then
+                        aws_rm_cmd="$aws_rm_cmd --endpoint-url $S3_ENDPOINT"
+                    fi
+                    eval "$aws_rm_cmd"
+                fi
+            fi
+        done
+    fi
 }
 
 # Clean old backups based on retention policy
@@ -367,6 +560,7 @@ main() {
     
     # Post-backup tasks
     cleanup_old_backups
+    cleanup_s3_backups
     generate_report
     
     log "=== Backup process completed successfully ==="
