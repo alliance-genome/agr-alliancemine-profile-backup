@@ -11,6 +11,7 @@ BACKUP_DATA_DIR="$BACKUP_SYSTEM_DIR/backups"
 
 # Load configuration
 if [ -f "$CONFIG_DIR/backup_config.env" ]; then
+    # shellcheck source=config/backup_config.env
     source "$CONFIG_DIR/backup_config.env"
 else
     echo "Error: Configuration file not found at $CONFIG_DIR/backup_config.env"
@@ -19,6 +20,7 @@ fi
 
 # Load local configuration overrides if available
 if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    # shellcheck source=/dev/null
     source "$BACKUP_SYSTEM_DIR/.env.local"
 fi
 
@@ -69,7 +71,7 @@ fi
 echo
 
 # Test 4: Test restoration (optional - creates temporary database)
-read -p "Test restoration? This will create a temporary database '$TEST_DB' (y/N): " test_restore
+read -r -p "Test restoration? This will create a temporary database '$TEST_DB' (y/N): " test_restore
 if [[ $test_restore == [yY] ]]; then
     echo "🧪 Test 4: Testing backup restoration..."
     
@@ -104,14 +106,14 @@ if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
     echo "🧪 Test 5: Testing S3 functionality..."
     
     # Build S3 path for the latest backup
-    local s3_base="s3://$S3_BUCKET"
+    s3_base="s3://$S3_BUCKET"
     if [ -n "$S3_PREFIX" ]; then
         s3_base="$s3_base/$S3_PREFIX"
     fi
-    local s3_backup_path="$s3_base/daily/$(basename "$LATEST_BACKUP")"
+    s3_backup_path="$s3_base/daily/$(basename "$LATEST_BACKUP")"
     
     # Build AWS CLI command
-    local aws_cmd="aws s3 ls \"$s3_backup_path\""
+    aws_cmd="aws s3 ls \"$s3_backup_path\""
     if [ -n "$S3_REGION" ]; then
         aws_cmd="$aws_cmd --region $S3_REGION"
     fi
@@ -125,11 +127,11 @@ if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
         echo "   Backup found in S3: $(basename "$LATEST_BACKUP")"
         
         # Optional: Test S3 download
-        read -p "Test S3 download? This will download the backup to verify it works (y/N): " test_download
+        read -r -p "Test S3 download? This will download the backup to verify it works (y/N): " test_download
         if [[ $test_download == [yY] ]]; then
-            local temp_download="/tmp/s3_test_$(basename "$LATEST_BACKUP")"
+            temp_download="/tmp/s3_test_$(basename "$LATEST_BACKUP")"
             
-            local download_cmd="aws s3 cp \"$s3_backup_path\" \"$temp_download\""
+            download_cmd="aws s3 cp \"$s3_backup_path\" \"$temp_download\""
             if [ -n "$S3_REGION" ]; then
                 download_cmd="$download_cmd --region $S3_REGION"
             fi

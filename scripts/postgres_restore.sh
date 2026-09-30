@@ -13,6 +13,7 @@ BACKUP_DATA_DIR="$BACKUP_SYSTEM_DIR/backups"
 
 # Load configuration
 if [ -f "$CONFIG_DIR/backup_config.env" ]; then
+    # shellcheck source=config/backup_config.env
     source "$CONFIG_DIR/backup_config.env"
 else
     echo "Error: Configuration file not found at $CONFIG_DIR/backup_config.env"
@@ -21,6 +22,7 @@ fi
 
 # Load local configuration overrides if available
 if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    # shellcheck source=/dev/null
     source "$BACKUP_SYSTEM_DIR/.env.local"
 fi
 
@@ -58,10 +60,14 @@ list_s3_backups() {
     for backup_type in daily weekly; do
         local s3_path="$s3_base/$backup_type/"
         eval "$aws_cmd \"$s3_path\"" 2>/dev/null | grep "postgres_${backup_type}_.*\.sql\.gz" | while read -r line; do
-            local date_part=$(echo "$line" | awk '{print $1}')
-            local time_part=$(echo "$line" | awk '{print $2}')
-            local size=$(echo "$line" | awk '{print $3}' | numfmt --to=iec)
-            local filename=$(echo "$line" | awk '{print $4}' | sed "s|.*/||")
+            local date_part
+            date_part=$(echo "$line" | awk '{print $1}')
+            local time_part
+            time_part=$(echo "$line" | awk '{print $2}')
+            local size
+            size=$(echo "$line" | awk '{print $3}' | numfmt --to=iec)
+            local filename
+            filename=$(echo "$line" | awk '{print $4}' | sed "s|.*/||")
             echo "$date_part $time_part - s3://$filename ($size)"
         done
     done | sort -r
@@ -97,7 +103,7 @@ if [ -z "$BACKUP_FILE" ]; then
     echo
     echo "Available local backups:"
     echo "======================="
-    find "$BACKUP_DATA_DIR" -name "*.sql.gz" -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -20 | while read timestamp path; do
+    find "$BACKUP_DATA_DIR" -name "*.sql.gz" -printf "%T@ %p\n" 2>/dev/null | sort -nr | head -20 | while read -r timestamp path; do
         size=$(du -h "$path" | cut -f1)
         date=$(date -d "@$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$timestamp" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "Unknown date")
         echo "$date - $(basename "$path") ($size)"
@@ -131,10 +137,10 @@ if [[ "$BACKUP_FILE" == s3://* ]]; then
     TEMP_FILE="/tmp/$(basename "$BACKUP_FILE")_$$"
     
     # Build full S3 path
-    local s3_full_path
+    s3_full_path=""
     if [[ "$BACKUP_FILE" == s3://* ]]; then
         # Remove s3:// prefix and build full path
-        local filename=$(echo "$BACKUP_FILE" | sed 's|s3://||')
+        filename="${BACKUP_FILE#s3://}"
         s3_full_path="s3://$S3_BUCKET"
         if [ -n "$S3_PREFIX" ]; then
             s3_full_path="$s3_full_path/$S3_PREFIX"
@@ -142,7 +148,7 @@ if [[ "$BACKUP_FILE" == s3://* ]]; then
         
         # Try to find the file in daily or weekly directories
         for backup_type in daily weekly; do
-            local test_path="$s3_full_path/$backup_type/$filename"
+            test_path="$s3_full_path/$backup_type/$filename"
             if aws s3 ls "$test_path" >/dev/null 2>&1; then
                 s3_full_path="$test_path"
                 break
@@ -175,7 +181,7 @@ echo "Restoring from: $BACKUP_FILE"
 echo "Target database: $TARGET_DB"
 echo "Target host: $DB_HOST"
 
-read -p "Continue? (y/N): " confirm
+read -r -p "Continue? (y/N): " confirm
 if [[ $confirm != [yY] ]]; then
     echo "Restore cancelled."
     exit 0
