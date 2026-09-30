@@ -10,6 +10,7 @@ BACKUP_DATA_DIR="$BACKUP_SYSTEM_DIR/backups"
 
 # Load configuration
 if [ -f "$CONFIG_DIR/backup_config.env" ]; then
+    # shellcheck source=config/backup_config.env
     source "$CONFIG_DIR/backup_config.env"
 else
     echo "Error: Configuration file not found at $CONFIG_DIR/backup_config.env"
@@ -18,6 +19,7 @@ fi
 
 # Load local configuration overrides if available
 if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    # shellcheck source=/dev/null
     source "$BACKUP_SYSTEM_DIR/.env.local"
 fi
 
@@ -87,13 +89,13 @@ if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
     fi
     
     # Build base S3 path
-    local s3_base="s3://$S3_BUCKET"
+    s3_base="s3://$S3_BUCKET"
     if [ -n "$S3_PREFIX" ]; then
         s3_base="$s3_base/$S3_PREFIX"
     fi
     
     # Build AWS CLI command
-    local aws_cmd="aws s3 ls"
+    aws_cmd="aws s3 ls"
     if [ -n "$S3_REGION" ]; then
         aws_cmd="$aws_cmd --region $S3_REGION"
     fi
@@ -102,14 +104,14 @@ if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
     fi
     
     # Count S3 backups
-    local s3_daily_count=$(eval "$aws_cmd \"$s3_base/daily/\"" 2>/dev/null | grep -c "postgres_daily_" || echo "0")
-    local s3_weekly_count=$(eval "$aws_cmd \"$s3_base/weekly/\"" 2>/dev/null | grep -c "postgres_weekly_" || echo "0")
+    s3_daily_count=$(eval "$aws_cmd \"$s3_base/daily/\"" 2>/dev/null | grep -c "postgres_daily_" || true)
+    s3_weekly_count=$(eval "$aws_cmd \"$s3_base/weekly/\"" 2>/dev/null | grep -c "postgres_weekly_" || true)
     
     echo "   Daily backups in S3: $s3_daily_count"
     echo "   Weekly backups in S3: $s3_weekly_count"
     
     # Show latest S3 backup
-    local latest_s3=$(eval "$aws_cmd --recursive \"$s3_base/\"" 2>/dev/null | grep "postgres_.*\.sql\.gz" | tail -1)
+    latest_s3=$(eval "$aws_cmd --recursive \"$s3_base/\"" 2>/dev/null | grep "postgres_.*\.sql\.gz" | tail -1)
     if [ -n "$latest_s3" ]; then
         echo "   Latest S3 backup:"
         echo "   $(echo "$latest_s3" | awk '{print "   " $4 " (" $3 " bytes) - " $1 " " $2}')"

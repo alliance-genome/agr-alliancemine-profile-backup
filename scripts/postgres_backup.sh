@@ -14,6 +14,7 @@ BACKUP_DATA_DIR="$BACKUP_SYSTEM_DIR/backups"
 
 # Load configuration
 if [ -f "$CONFIG_DIR/backup_config.env" ]; then
+    # shellcheck source=config/backup_config.env
     source "$CONFIG_DIR/backup_config.env"
 else
     echo "Error: Configuration file not found at $CONFIG_DIR/backup_config.env"
@@ -23,6 +24,7 @@ fi
 
 # Load local configuration overrides if available
 if [ -f "$BACKUP_SYSTEM_DIR/.env.local" ]; then
+    # shellcheck source=/dev/null
     source "$BACKUP_SYSTEM_DIR/.env.local"
 fi
 
@@ -30,6 +32,9 @@ fi
 BACKUP_TYPE=${1:-daily}
 DATE=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$BACKUP_DATA_DIR/logs/backup.log"
+
+# backups/ subdirectories are not tracked by git; log() needs this to exist
+mkdir -p "$BACKUP_DATA_DIR/logs"
 
 # Retention settings (can be overridden in config)
 DAILY_RETENTION_DAYS=${DAILY_RETENTION_DAYS:-7}
@@ -169,7 +174,8 @@ test_connection() {
         log "Database connection successful"
         
         # Get database size for planning
-        local db_size=$(psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT pg_size_pretty(pg_database_size('$DB_NAME'))" 2>/dev/null || echo "Unknown")
+        local db_size
+        db_size=$(psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT pg_size_pretty(pg_database_size('$DB_NAME'))" 2>/dev/null || echo "Unknown")
         info "Database size: $db_size"
     else
         error "Cannot connect to database. Please check:"
@@ -205,11 +211,13 @@ create_backup() {
     info "Target file: $backup_filename"
     
     # Check available disk space
-    local available_space=$(df "$backup_dir" | tail -1 | awk '{print $4}')
-    info "Available disk space: $(echo $available_space | awk '{print int($1/1024/1024)" GB"}')"
+    local available_space
+    available_space=$(df "$backup_dir" | tail -1 | awk '{print $4}')
+    info "Available disk space: $(echo "$available_space" | awk '{print int($1/1024/1024)" GB"}')"
     
     # Create backup with error handling
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     
     if pg_dump -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
         --no-password \
@@ -229,9 +237,11 @@ create_backup() {
         fi
         
         # Calculate backup time and size
-        local end_time=$(date +%s)
+        local end_time
+        end_time=$(date +%s)
         local duration=$((end_time - start_time))
-        local file_size=$(du -h "$backup_path" | cut -f1)
+        local file_size
+        file_size=$(du -h "$backup_path" | cut -f1)
         
         log "Backup completed successfully!"
         info "Backup file: $backup_filename"
@@ -275,8 +285,8 @@ verify_backup_integrity() {
         return 1
     fi
     
-    # Test PostgreSQL backup format
-    if ! pg_restore --list "$backup_file" >/dev/null 2>&1; then
+    # Test PostgreSQL backup format (the custom-format dump is gzipped)
+    if ! gunzip -c "$backup_file" | pg_restore --list >/dev/null 2>&1; then
         error "Backup file is corrupted (pg_restore test failed)"
         return 1
     fi
@@ -287,7 +297,8 @@ verify_backup_integrity() {
 # Upload backup to S3
 upload_to_s3() {
     local backup_file="$1"
-    local backup_filename="$(basename "$backup_file")"
+    local backup_filename
+    backup_filename="$(basename "$backup_file")"
     
     if [ -z "$S3_BUCKET" ]; then
         info "S3_BUCKET not configured - skipping S3 upload"
@@ -321,10 +332,12 @@ upload_to_s3() {
     fi
     
     # Execute upload with progress
-    local upload_start_time=$(date +%s)
+    local upload_start_time
+    upload_start_time=$(date +%s)
     
     if eval "$aws_cmd"; then
-        local upload_end_time=$(date +%s)
+        local upload_end_time
+        upload_end_time=$(date +%s)
         local upload_duration=$((upload_end_time - upload_start_time))
         
         log "S3 upload completed successfully!"
@@ -358,7 +371,8 @@ verify_s3_upload() {
     info "Verifying S3 upload integrity..."
     
     # Get local file size
-    local local_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null)
+    local local_size
+    local_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null)
     
     # Get S3 file size
     local aws_ls_cmd="aws s3 ls \"$s3_path\""
@@ -369,7 +383,8 @@ verify_s3_upload() {
         aws_ls_cmd="$aws_ls_cmd --endpoint-url $S3_ENDPOINT"
     fi
     
-    local s3_size=$(eval "$aws_ls_cmd" | awk '{print $3}')
+    local s3_size
+    s3_size=$(eval "$aws_ls_cmd" | awk '{print $3}')
     
     if [ -n "$s3_size" ] && [ "$local_size" = "$s3_size" ]; then
         return 0
@@ -403,7 +418,8 @@ cleanup_s3_backups() {
     fi
     
     # Clean daily backups from S3
-    local daily_cutoff_date=$(date -d "$DAILY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-${DAILY_RETENTION_DAYS}d +%Y%m%d 2>/dev/null)
+    local daily_cutoff_date
+    daily_cutoff_date=$(date -d "$DAILY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-"${DAILY_RETENTION_DAYS}"d +%Y%m%d 2>/dev/null)
     if [ -n "$daily_cutoff_date" ]; then
         info "Cleaning S3 daily backups older than $daily_cutoff_date..."
         local daily_s3_path="$s3_base/daily/"
@@ -428,7 +444,8 @@ cleanup_s3_backups() {
     fi
     
     # Clean weekly backups from S3
-    local weekly_cutoff_date=$(date -d "$WEEKLY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-${WEEKLY_RETENTION_DAYS}d +%Y%m%d 2>/dev/null)
+    local weekly_cutoff_date
+    weekly_cutoff_date=$(date -d "$WEEKLY_RETENTION_DAYS days ago" +%Y%m%d 2>/dev/null || date -v-"${WEEKLY_RETENTION_DAYS}"d +%Y%m%d 2>/dev/null)
     if [ -n "$weekly_cutoff_date" ]; then
         info "Cleaning S3 weekly backups older than $weekly_cutoff_date..."
         local weekly_s3_path="$s3_base/weekly/"
@@ -460,8 +477,10 @@ cleanup_old_backups() {
     # Clean daily backups
     local daily_dir="$BACKUP_DATA_DIR/daily"
     if [ -d "$daily_dir" ]; then
-        local daily_files=$(find "$daily_dir" -name "postgres_daily_*.sql.gz" -mtime +$DAILY_RETENTION_DAYS 2>/dev/null)
-        local daily_count=$(echo "$daily_files" | grep -c . 2>/dev/null || echo 0)
+        local daily_files
+        daily_files=$(find "$daily_dir" -name "postgres_daily_*.sql.gz" -mtime +"$DAILY_RETENTION_DAYS" 2>/dev/null)
+        local daily_count
+        daily_count=$(echo "$daily_files" | grep -c . 2>/dev/null || true)
         
         if [ "$daily_count" -gt 0 ]; then
             info "Removing $daily_count daily backup(s) older than $DAILY_RETENTION_DAYS days..."
@@ -475,8 +494,10 @@ cleanup_old_backups() {
     # Clean weekly backups
     local weekly_dir="$BACKUP_DATA_DIR/weekly"
     if [ -d "$weekly_dir" ]; then
-        local weekly_files=$(find "$weekly_dir" -name "postgres_weekly_*.sql.gz" -mtime +$WEEKLY_RETENTION_DAYS 2>/dev/null)
-        local weekly_count=$(echo "$weekly_files" | grep -c . 2>/dev/null || echo 0)
+        local weekly_files
+        weekly_files=$(find "$weekly_dir" -name "postgres_weekly_*.sql.gz" -mtime +"$WEEKLY_RETENTION_DAYS" 2>/dev/null)
+        local weekly_count
+        weekly_count=$(echo "$weekly_files" | grep -c . 2>/dev/null || true)
         
         if [ "$weekly_count" -gt 0 ]; then
             info "Removing $weekly_count weekly backup(s) older than $WEEKLY_RETENTION_DAYS days..."
@@ -488,7 +509,8 @@ cleanup_old_backups() {
     fi
     
     # Clean old log files (keep last 30 days)
-    local old_logs=$(find "$BACKUP_DATA_DIR/logs" -name "*.log" -mtime +30 2>/dev/null)
+    local old_logs
+    old_logs=$(find "$BACKUP_DATA_DIR/logs" -name "*.log" -mtime +30 2>/dev/null)
     if [ -n "$old_logs" ]; then
         info "Cleaning old log files..."
         echo "$old_logs" | xargs rm -f
@@ -499,24 +521,29 @@ cleanup_old_backups() {
 generate_report() {
     log "Generating backup report..."
     
-    echo "=== BACKUP REPORT ===" >> "$LOG_FILE"
-    echo "Date: $(date)" >> "$LOG_FILE"
-    echo "Type: $BACKUP_TYPE" >> "$LOG_FILE"
-    echo "System: $BACKUP_SYSTEM_DIR" >> "$LOG_FILE"
-    echo "" >> "$LOG_FILE"
+    {
+        echo "=== BACKUP REPORT ==="
+        echo "Date: $(date)"
+        echo "Type: $BACKUP_TYPE"
+        echo "System: $BACKUP_SYSTEM_DIR"
+        echo ""
+    } >> "$LOG_FILE"
     
     # Count and size of backups by type
     for type in daily weekly; do
         local dir="$BACKUP_DATA_DIR/$type"
         if [ -d "$dir" ]; then
-            local count=$(find "$dir" -name "postgres_${type}_*.sql.gz" 2>/dev/null | wc -l)
-            local total_size=$(du -sh "$dir" 2>/dev/null | cut -f1 || echo "0B")
+            local count
+            count=$(find "$dir" -name "postgres_${type}_*.sql.gz" 2>/dev/null | wc -l)
+            local total_size
+            total_size=$(du -sh "$dir" 2>/dev/null | cut -f1 || echo "0B")
             echo "$type backups: $count files, $total_size total" >> "$LOG_FILE"
         fi
     done
     
     # Overall system size
-    local system_size=$(du -sh "$BACKUP_DATA_DIR" 2>/dev/null | cut -f1 || echo "0B")
+    local system_size
+    system_size=$(du -sh "$BACKUP_DATA_DIR" 2>/dev/null | cut -f1 || echo "0B")
     echo "Total backup system size: $system_size" >> "$LOG_FILE"
     echo "" >> "$LOG_FILE"
 }
@@ -571,8 +598,10 @@ main() {
     log "=== Backup process completed successfully ==="
     
     # Final status summary
-    local total_backups=$(find "$BACKUP_DATA_DIR" -name "postgres_*.sql.gz" | wc -l)
-    local total_size=$(du -sh "$BACKUP_DATA_DIR" | cut -f1)
+    local total_backups
+    total_backups=$(find "$BACKUP_DATA_DIR" -name "postgres_*.sql.gz" | wc -l)
+    local total_size
+    total_size=$(du -sh "$BACKUP_DATA_DIR" | cut -f1)
     info "Total backups in system: $total_backups files ($total_size)"
     
     return 0
@@ -584,7 +613,7 @@ cleanup_on_exit() {
     if [ $exit_code -ne 0 ]; then
         error "Backup process failed with exit code $exit_code"
         # Cleanup any temporary files
-        rm -f /tmp/postgres_backup_${BACKUP_TYPE}_*.sql 2>/dev/null || true
+        rm -f "/tmp/postgres_backup_${BACKUP_TYPE}_"*.sql 2>/dev/null || true
     fi
     exit $exit_code
 }

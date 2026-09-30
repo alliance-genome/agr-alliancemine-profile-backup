@@ -29,6 +29,8 @@ postgres-backup-system/
 - `scripts/backup_status.sh` - Check status
 - `scripts/postgres_restore.sh backup_file` - Restore backup
 - `scripts/test_backup.sh` - Test system
+- `tests/local_backup_test.sh` - Backup + restore round trip against a throwaway PostgreSQL cluster (needs `initdb`/`pg_ctl` on PATH; used in CI)
+- `shellcheck scripts/*.sh` - Lint (config in `.shellcheckrc`)
 
 ## Configuration
 Edit `config/backup_config.env` with your database details:
