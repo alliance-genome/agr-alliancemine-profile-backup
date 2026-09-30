@@ -45,6 +45,16 @@ S3_REGION=${S3_REGION:-""}
 S3_ENDPOINT=${S3_ENDPOINT:-""}
 KEEP_LOCAL_BACKUPS=${KEEP_LOCAL_BACKUPS:-"true"}
 
+# Storage backend: "file" (pg_dump -> gzip -> backups/ [+ S3 copy]) or
+# "restic" (pg_dump streamed into a restic repository, which handles
+# encryption, deduplication and retention). restic reads RESTIC_REPOSITORY,
+# RESTIC_PASSWORD_FILE (or RESTIC_PASSWORD / RESTIC_PASSWORD_COMMAND) and,
+# for s3: repositories, the usual AWS_* variables from the environment.
+BACKUP_BACKEND=${BACKUP_BACKEND:-"file"}
+RESTIC_VERIFY_DUMP=${RESTIC_VERIFY_DUMP:-"true"}
+RESTIC_PRUNE=${RESTIC_PRUNE:-"true"}
+RESTIC_MIN_VERSION="0.17.0"  # --stdin-from-command
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -77,6 +87,7 @@ show_system_info() {
     info "Target Database: $DB_NAME on $DB_HOST"
     info "Retention Policy: Daily($DAILY_RETENTION_DAYS days), Weekly($WEEKLY_RETENTION_DAYS days)"
     info "Compression Level: $BACKUP_COMPRESSION_LEVEL"
+    info "Storage Backend: $BACKUP_BACKEND"
     log "=========================="
 }
 
@@ -112,6 +123,24 @@ validate_configuration() {
         missing_config=true
     fi
     
+    case "$BACKUP_BACKEND" in
+        file) ;;
+        restic)
+            if [ -z "${RESTIC_REPOSITORY:-}" ]; then
+                error "RESTIC_REPOSITORY not configured (required for BACKUP_BACKEND=restic)"
+                missing_config=true
+            fi
+            if [ -z "${RESTIC_PASSWORD_FILE:-}" ] && [ -z "${RESTIC_PASSWORD:-}" ] && [ -z "${RESTIC_PASSWORD_COMMAND:-}" ]; then
+                error "Set RESTIC_PASSWORD_FILE (or RESTIC_PASSWORD / RESTIC_PASSWORD_COMMAND) for BACKUP_BACKEND=restic"
+                missing_config=true
+            fi
+            ;;
+        *)
+            error "Invalid BACKUP_BACKEND: $BACKUP_BACKEND (expected file or restic)"
+            missing_config=true
+            ;;
+    esac
+
     if [ "$missing_config" = true ]; then
         error "Missing required configuration. Please check $CONFIG_DIR/backup_config.env"
         exit 1
@@ -141,8 +170,24 @@ check_dependencies() {
         missing_deps=true
     fi
     
-    # Check AWS CLI if S3 is configured
-    if [ -n "$S3_BUCKET" ]; then
+    if [ "$BACKUP_BACKEND" = "restic" ]; then
+        if ! command -v restic &> /dev/null; then
+            error "restic not found but BACKUP_BACKEND=restic. See https://restic.readthedocs.io/en/stable/020_installation.html"
+            missing_deps=true
+        else
+            local restic_version
+            restic_version=$(restic version | awk '{print $2}')
+            if ! version_at_least "$restic_version" "$RESTIC_MIN_VERSION"; then
+                error "restic $restic_version is too old; $RESTIC_MIN_VERSION or newer is required"
+                missing_deps=true
+            else
+                info "restic $restic_version found - backing up to restic repository"
+            fi
+        fi
+    fi
+
+    # Check AWS CLI if S3 is configured (file backend only)
+    if [ "$BACKUP_BACKEND" = "file" ] && [ -n "$S3_BUCKET" ]; then
         if ! command -v aws &> /dev/null; then
             error "AWS CLI not found but S3_BUCKET is configured. Please install AWS CLI."
             missing_deps=true
@@ -260,6 +305,82 @@ create_backup() {
         rm -f "$temp_backup" 2>/dev/null
         send_notifications "failure" "$backup_filename" "" ""
         exit 1
+    fi
+}
+
+# True if dotted version $1 >= $2
+version_at_least() {
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$2" ]
+}
+
+# Name of the dump file inside restic snapshots
+restic_dump_name() {
+    echo "postgres_${DB_NAME}.dump"
+}
+
+# Stream pg_dump straight into restic (no local dump file)
+create_restic_backup() {
+    local dump_name
+    dump_name=$(restic_dump_name)
+    local tags="postgres,$BACKUP_TYPE,db:$DB_NAME"
+
+    log "Starting $BACKUP_TYPE backup into restic repository..."
+    info "Snapshot file: /$dump_name (tags: $tags)"
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Uncompressed custom format: restic compresses and deduplicates it far
+    # better than a pre-compressed archive. restic fails the snapshot if
+    # pg_dump exits non-zero.
+    if restic backup --stdin-from-command --stdin-filename "$dump_name" \
+        --tag "$tags" \
+        -- pg_dump -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" \
+            --no-password --format=custom --compress=0 >> "$LOG_FILE" 2>&1; then
+
+        local end_time
+        end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        log "restic backup completed in ${duration} seconds"
+
+        if [ "$RESTIC_VERIFY_DUMP" = "true" ]; then
+            info "Verifying latest snapshot with pg_restore --list..."
+            if restic dump latest "/$dump_name" --tag "$tags" 2>> "$LOG_FILE" | pg_restore --list >/dev/null 2>&1; then
+                log "Backup integrity verification passed"
+            else
+                error "Backup integrity verification failed!"
+                send_notifications "failure" "$dump_name" "" ""
+                exit 1
+            fi
+        fi
+
+        send_notifications "success" "restic:/$dump_name" "restic" "$duration"
+    else
+        error "restic backup failed!"
+        send_notifications "failure" "$dump_name" "" ""
+        exit 1
+    fi
+}
+
+# Apply DAILY/WEEKLY_RETENTION_DAYS to restic snapshots of this database
+cleanup_restic_snapshots() {
+    log "Applying restic retention policy..."
+    local type days
+    for type in daily weekly; do
+        if [ "$type" = "daily" ]; then days="$DAILY_RETENTION_DAYS"; else days="$WEEKLY_RETENTION_DAYS"; fi
+        # --keep-within is relative to the newest snapshot, so the latest backup is never removed
+        if ! restic forget --tag "postgres,$type,db:$DB_NAME" --group-by host,tags \
+            --keep-within "${days}d" >> "$LOG_FILE" 2>&1; then
+            warning "restic forget failed for $type snapshots"
+        fi
+    done
+
+    if [ "$RESTIC_PRUNE" = "true" ]; then
+        if restic prune >> "$LOG_FILE" 2>&1; then
+            log "restic prune completed"
+        else
+            warning "restic prune failed"
+        fi
     fi
 }
 
@@ -560,12 +681,15 @@ main() {
     check_dependencies
     test_connection
     
-    # Execute backup
-    create_backup
-    
-    # Post-backup tasks
-    cleanup_old_backups
-    cleanup_s3_backups
+    # Execute backup and post-backup retention
+    if [ "$BACKUP_BACKEND" = "restic" ]; then
+        create_restic_backup
+        cleanup_restic_snapshots
+    else
+        create_backup
+        cleanup_old_backups
+        cleanup_s3_backups
+    fi
     generate_report
     
     log "=== Backup process completed successfully ==="

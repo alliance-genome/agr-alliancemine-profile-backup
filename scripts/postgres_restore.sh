@@ -32,6 +32,7 @@ S3_ENDPOINT=${S3_ENDPOINT:-""}
 
 BACKUP_FILE="$1"
 TARGET_DB="${2:-$DB_NAME}"
+RESTIC_SNAPSHOT=""
 
 # List S3 backups
 list_s3_backups() {
@@ -103,6 +104,14 @@ if [ -z "$BACKUP_FILE" ]; then
         echo "$date - $(basename "$path") ($size)"
     done
     
+    # Show restic snapshots if configured
+    if [ -n "${RESTIC_REPOSITORY:-}" ] && command -v restic &> /dev/null; then
+        echo
+        echo "Available restic snapshots (use restic:<snapshot-id> or restic:latest):"
+        echo "========================================================================"
+        restic snapshots --tag "postgres,db:$DB_NAME" 2>/dev/null | tail -22
+    fi
+
     # Show S3 backups if configured
     if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
         echo
@@ -113,9 +122,20 @@ if [ -z "$BACKUP_FILE" ]; then
     exit 1
 fi
 
-# Handle S3 files or local paths
+# Handle restic snapshots, S3 files or local paths
 TEMP_FILE=""
-if [[ "$BACKUP_FILE" == s3://* ]]; then
+if [[ "$BACKUP_FILE" == restic:* ]]; then
+    if ! command -v restic &> /dev/null; then
+        echo "Error: restic not found but restic snapshot specified"
+        exit 1
+    fi
+    if [ -z "${RESTIC_REPOSITORY:-}" ]; then
+        echo "Error: restic snapshot specified but RESTIC_REPOSITORY not configured"
+        exit 1
+    fi
+    RESTIC_SNAPSHOT="${BACKUP_FILE#restic:}"
+    RESTIC_SNAPSHOT="${RESTIC_SNAPSHOT:-latest}"
+elif [[ "$BACKUP_FILE" == s3://* ]]; then
     # S3 file - need to download first
     if [ -z "$S3_BUCKET" ]; then
         echo "Error: S3 file specified but S3_BUCKET not configured"
@@ -166,7 +186,7 @@ elif [[ "$BACKUP_FILE" != /* ]]; then
     fi
 fi
 
-if [ ! -f "$BACKUP_FILE" ]; then
+if [ -z "$RESTIC_SNAPSHOT" ] && [ ! -f "$BACKUP_FILE" ]; then
     echo "Error: Backup file not found: $BACKUP_FILE"
     exit 1
 fi
@@ -182,7 +202,14 @@ if [[ $confirm != [yY] ]]; then
 fi
 
 echo "Starting restore..."
-gunzip -c "$BACKUP_FILE" | pg_restore -h "$DB_HOST" -U "$DB_USER" -d "$TARGET_DB" --verbose --clean --if-exists
+if [ -n "$RESTIC_SNAPSHOT" ]; then
+    # Snapshots hold an uncompressed custom-format dump named after the source DB
+    set -o pipefail
+    restic dump "$RESTIC_SNAPSHOT" "/postgres_${DB_NAME}.dump" --tag "postgres,db:$DB_NAME" \
+        | pg_restore -h "$DB_HOST" -U "$DB_USER" -d "$TARGET_DB" --verbose --clean --if-exists
+else
+    gunzip -c "$BACKUP_FILE" | pg_restore -h "$DB_HOST" -U "$DB_USER" -d "$TARGET_DB" --verbose --clean --if-exists
+fi
 
 echo "Restore completed successfully!"
 

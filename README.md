@@ -37,7 +37,19 @@ Edit `config/backup_config.env` with your database details:
 - DB_USER: Database username
 - Retention settings for daily/weekly backups
 
-## Security
+## restic backend (optional)
+Set `BACKUP_BACKEND=restic` to stream `pg_dump` straight into a
+[restic](https://restic.net) repository (restic >= 0.17) instead of writing
+gzipped files under `backups/`. restic encrypts, deduplicates and compresses
+the dump; `DAILY_RETENTION_DAYS`/`WEEKLY_RETENTION_DAYS` are applied with
+`restic forget --keep-within` + `restic prune`. Configure `RESTIC_REPOSITORY`
+and `RESTIC_PASSWORD_FILE` (and `AWS_*` for `s3:` repositories) in
+`.env.local` - see `.env.example`.
+
+- Restore: `scripts/postgres_restore.sh restic:latest [target_db]` or `restic:<snapshot-id>`
+- List: `restic snapshots --tag postgres`
+- Test: `tests/restic_backend_test.sh` (throwaway cluster + local repo)
+
 Run `scripts/setup_pgpass.sh` to configure secure password authentication
 instead of storing passwords in environment variables.
 
