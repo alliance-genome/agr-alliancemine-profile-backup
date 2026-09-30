@@ -40,7 +40,9 @@ Key design patterns:
 - Optional variables: `DAILY_RETENTION_DAYS`, `WEEKLY_RETENTION_DAYS`, `BACKUP_COMPRESSION_LEVEL`
 - S3 variables (optional): `S3_BUCKET`, `S3_PREFIX`, `S3_STORAGE_CLASS`, `S3_REGION`, `S3_ENDPOINT`, `KEEP_LOCAL_BACKUPS`
 
-### Secure S3 Configuration
+### restic Backend
+`BACKUP_BACKEND=restic` (default `file`) replaces the gzip/local/S3 flow with `restic backup --stdin-from-command -- pg_dump --format=custom --compress=0`, tagged `postgres,<daily|weekly>,db:<DB_NAME>`, file `/postgres_<DB_NAME>.dump` inside the snapshot. Retention: `restic forget --keep-within <days>d` per type, then `restic prune` (`RESTIC_PRUNE=false` to skip). `RESTIC_VERIFY_DUMP=false` skips the `restic dump | pg_restore --list` check for very large DBs. Restore with `postgres_restore.sh restic:latest|restic:<id>`. Test: `tests/restic_backend_test.sh`.
+
 For security, avoid storing S3 bucket details in the repository:
 - **Option 1**: Use environment variables: `export S3_BUCKET="your-bucket"` 
 - **Option 2**: Create `.env.local` file with S3 settings (automatically sourced, ignored by git)
