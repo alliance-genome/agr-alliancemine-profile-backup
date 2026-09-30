@@ -61,5 +61,5 @@ The system can be automated with cron jobs:
 - Compressed backups (70-80% size reduction)
 - Integrity verification
 - Detailed logging
-- Optional notifications (Slack/Email)
+- Optional notifications via [Apprise](https://github.com/caronc/apprise) (Slack, email, Teams, ... - set `APPRISE_URLS` in `.env.local`, see `.env.example`)
 - Easy restoration
