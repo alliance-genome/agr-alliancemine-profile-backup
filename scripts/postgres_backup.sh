@@ -33,6 +33,9 @@ BACKUP_TYPE=${1:-daily}
 DATE=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$BACKUP_DATA_DIR/logs/backup.log"
 
+# backups/ subdirectories are not tracked by git; log() needs this to exist
+mkdir -p "$BACKUP_DATA_DIR/logs"
+
 # Retention settings (can be overridden in config)
 DAILY_RETENTION_DAYS=${DAILY_RETENTION_DAYS:-7}
 WEEKLY_RETENTION_DAYS=${WEEKLY_RETENTION_DAYS:-90}
@@ -282,8 +285,8 @@ verify_backup_integrity() {
         return 1
     fi
     
-    # Test PostgreSQL backup format
-    if ! pg_restore --list "$backup_file" >/dev/null 2>&1; then
+    # Test PostgreSQL backup format (the custom-format dump is gzipped)
+    if ! gunzip -c "$backup_file" | pg_restore --list >/dev/null 2>&1; then
         error "Backup file is corrupted (pg_restore test failed)"
         return 1
     fi
@@ -477,7 +480,7 @@ cleanup_old_backups() {
         local daily_files
         daily_files=$(find "$daily_dir" -name "postgres_daily_*.sql.gz" -mtime +"$DAILY_RETENTION_DAYS" 2>/dev/null)
         local daily_count
-        daily_count=$(echo "$daily_files" | grep -c . 2>/dev/null || echo 0)
+        daily_count=$(echo "$daily_files" | grep -c . 2>/dev/null || true)
         
         if [ "$daily_count" -gt 0 ]; then
             info "Removing $daily_count daily backup(s) older than $DAILY_RETENTION_DAYS days..."
@@ -494,7 +497,7 @@ cleanup_old_backups() {
         local weekly_files
         weekly_files=$(find "$weekly_dir" -name "postgres_weekly_*.sql.gz" -mtime +"$WEEKLY_RETENTION_DAYS" 2>/dev/null)
         local weekly_count
-        weekly_count=$(echo "$weekly_files" | grep -c . 2>/dev/null || echo 0)
+        weekly_count=$(echo "$weekly_files" | grep -c . 2>/dev/null || true)
         
         if [ "$weekly_count" -gt 0 ]; then
             info "Removing $weekly_count weekly backup(s) older than $WEEKLY_RETENTION_DAYS days..."

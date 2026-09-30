@@ -104,8 +104,8 @@ if [ -n "$S3_BUCKET" ] && command -v aws &> /dev/null; then
     fi
     
     # Count S3 backups
-    s3_daily_count=$(eval "$aws_cmd \"$s3_base/daily/\"" 2>/dev/null | grep -c "postgres_daily_" || echo "0")
-    s3_weekly_count=$(eval "$aws_cmd \"$s3_base/weekly/\"" 2>/dev/null | grep -c "postgres_weekly_" || echo "0")
+    s3_daily_count=$(eval "$aws_cmd \"$s3_base/daily/\"" 2>/dev/null | grep -c "postgres_daily_" || true)
+    s3_weekly_count=$(eval "$aws_cmd \"$s3_base/weekly/\"" 2>/dev/null | grep -c "postgres_weekly_" || true)
     
     echo "   Daily backups in S3: $s3_daily_count"
     echo "   Weekly backups in S3: $s3_weekly_count"
