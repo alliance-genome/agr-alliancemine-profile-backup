@@ -10,6 +10,14 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The shipped config must not clobber BACKUP_BACKEND set in the environment
+# (e.g. `BACKUP_BACKEND=restic scripts/postgres_backup.sh daily`).
+# shellcheck disable=SC2016  # $1 is expanded by the inner bash
+backend="$(BACKUP_BACKEND=restic bash -c "source \"\$1\"; echo \"\$BACKUP_BACKEND\"" _ "$REPO_DIR/config/backup_config.env")"
+[ "$backend" = "restic" ] || { echo "FAIL: config/backup_config.env overrides BACKUP_BACKEND from the environment (got $backend)"; exit 1; }
+backend="$(env -u BACKUP_BACKEND bash -c "source \"\$1\"; echo \"\$BACKUP_BACKEND\"" _ "$REPO_DIR/config/backup_config.env")"
+[ "$backend" = "file" ] || { echo "FAIL: default BACKUP_BACKEND should be file (got $backend)"; exit 1; }
+
 for cmd in initdb pg_ctl createdb psql pg_dump pg_restore pg_isready restic; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "SKIP: $cmd not found"
