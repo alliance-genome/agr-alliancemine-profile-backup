@@ -76,7 +76,7 @@ When `S3_BUCKET` is configured, the system will:
 The backup script sends optional notifications through Apprise (`apprise` CLI, `pip install apprise`):
 - `APPRISE_URLS`: space-separated Apprise URLs (`slack://`, `mailto://`, `msteams://`, ...)
 - `APPRISE_CONFIG`: path to an Apprise config file
-- `SLACK_WEBHOOK_URL` still works (passed to Apprise as-is); `EMAIL_RECIPIENT` is no longer used - use a `mailto://` URL
+- Legacy settings still work: `SLACK_WEBHOOK_URL` is passed to Apprise (or posted with `curl` if apprise is not installed); `EMAIL_RECIPIENT` is still sent with `mail` (needs a local MTA) - prefer a `mailto://` URL
 - Keep these in `.env.local` (git-ignored); see `.env.example`
 
 ## Security Considerations

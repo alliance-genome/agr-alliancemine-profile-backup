@@ -15,7 +15,7 @@ mkdir -p "$SYS/config" "$SYS/backups/logs" "$WORK/bin"
 cp -R "$REPO_DIR/scripts" "$SYS/scripts"
 cat > "$SYS/config/backup_config.env" <<'CONF'
 export DB_HOST=db.example.org
-export DB_NAME=exampledb
+export DB_NAME='example"db'  # quote exercises JSON escaping
 export DB_USER=backup
 CONF
 
@@ -26,6 +26,17 @@ exit "${APPRISE_STUB_EXIT:-0}"
 STUB
 chmod +x "$WORK/bin/apprise"
 
+# Legacy delivery stubs so the test never sends real mail or HTTP requests.
+cat > "$WORK/bin/mail" <<'STUB'
+#!/bin/bash
+{ for a in "$@"; do printf '%s\n' "$a"; done; echo "--stdin--"; cat; } > "$MAIL_ARGS_FILE"
+STUB
+cat > "$WORK/bin/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do printf '%s\n' "$a"; done > "$CURL_ARGS_FILE"
+STUB
+chmod +x "$WORK/bin/mail" "$WORK/bin/curl"
+
 failures=0
 check() {
     local name="$1"; shift
@@ -35,8 +46,9 @@ check() {
 # Runs send_notifications in a subshell with the given env assignments.
 # shellcheck disable=SC2016  # single quotes are intentional (inner bash -c)
 run_notify() {
-    rm -f "$WORK/args" "$WORK/out"
-    env -i HOME="$HOME" PATH="$WORK/bin:/usr/bin:/bin" APPRISE_ARGS_FILE="$WORK/args" "$@" \
+    rm -f "$WORK/args" "$WORK/out" "$WORK/mail" "$WORK/curl"
+    env -i HOME="$HOME" PATH="$WORK/bin:/usr/bin:/bin" APPRISE_ARGS_FILE="$WORK/args" \
+        MAIL_ARGS_FILE="$WORK/mail" CURL_ARGS_FILE="$WORK/curl" "$@" \
         bash -c 'args=("$@"); set -- daily; source "$0/scripts/postgres_backup.sh"; send_notifications "${args[@]}"' \
         "$SYS" "${STATUS:-success}" postgres_daily_20250101_000000.sql.gz 12M 42 > "$WORK/out" 2>&1
 }
@@ -59,8 +71,11 @@ check "config file passed" bash -c "grep -qx -- '--config' '$WORK/args' && grep 
 run_notify
 check "nothing configured: apprise not called" test ! -f "$WORK/args"
 
-run_notify EMAIL_RECIPIENT="ops@example.com"
-check "EMAIL_RECIPIENT warns" grep -q "EMAIL_RECIPIENT is no longer used" "$WORK/out"
+STATUS=failure run_notify EMAIL_RECIPIENT="ops@example.com"
+check "EMAIL_RECIPIENT still mailed" grep -qx -- "ops@example.com" "$WORK/mail"
+check "mail subject kept" grep -qx -- "PostgreSQL Backup failure - daily" "$WORK/mail"
+check "mail body has title" grep -qx -- "PostgreSQL daily backup FAILED" "$WORK/mail"
+check "EMAIL_RECIPIENT alone: apprise not called" test ! -f "$WORK/args"
 
 run_notify APPRISE_URLS="json://localhost/a" APPRISE_STUB_EXIT=1
 check "delivery failure is a warning, not fatal" grep -q "Notification delivery failed" "$WORK/out"
@@ -68,6 +83,11 @@ check "delivery failure is a warning, not fatal" grep -q "Notification delivery 
 rm -f "$WORK/bin/apprise"
 run_notify APPRISE_URLS="json://localhost/a"
 check "missing apprise warns" grep -q "apprise is not installed" "$WORK/out"
+check "missing apprise: no curl without SLACK_WEBHOOK_URL" test ! -f "$WORK/curl"
+
+run_notify SLACK_WEBHOOK_URL="https://hooks.slack.com/services/T000/B000/XXXX"
+check "missing apprise: Slack webhook falls back to curl" grep -qx -- "https://hooks.slack.com/services/T000/B000/XXXX" "$WORK/curl"
+check "curl payload is escaped JSON" bash -c "grep '^{\"text\"' '$WORK/curl' | python3 -c 'import json,sys; t=json.load(sys.stdin)[\"text\"]; assert \"example\\\"db\" in t and \"\\n\" in t'"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

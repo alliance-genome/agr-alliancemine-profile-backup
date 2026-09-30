@@ -524,7 +524,9 @@ generate_report() {
 # Send notifications through Apprise (https://github.com/caronc/apprise).
 #   APPRISE_URLS       space-separated Apprise URLs (slack://, mailto://, msteams://, ...)
 #   APPRISE_CONFIG     path to an Apprise config file (TEXT or YAML)
-#   SLACK_WEBHOOK_URL  still honoured: Apprise accepts the raw Slack webhook URL
+#   SLACK_WEBHOOK_URL  still honoured: passed to Apprise (which accepts the raw
+#                      webhook URL), or posted with curl if apprise is missing
+#   EMAIL_RECIPIENT    still honoured: sent with mail(1) as before
 # Notification URLs usually embed tokens: keep them in .env.local, not in git.
 send_notifications() {
     local status="$1"
@@ -557,8 +559,10 @@ send_notifications() {
         config_args=(--config "$APPRISE_CONFIG")
     fi
 
-    if [ -n "${EMAIL_RECIPIENT:-}" ]; then
-        warning "EMAIL_RECIPIENT is no longer used; add a mailto:// URL to APPRISE_URLS instead"
+    # Legacy email path, unchanged: mail(1) needs a local MTA. Prefer a
+    # mailto:// URL in APPRISE_URLS.
+    if [ -n "${EMAIL_RECIPIENT:-}" ] && command -v mail &> /dev/null; then
+        printf '%s\n%s\n' "$title" "$body" | mail -s "PostgreSQL Backup $status - $BACKUP_TYPE" "$EMAIL_RECIPIENT" 2>/dev/null || true
     fi
 
     if [ ${#targets[@]} -eq 0 ] && [ ${#config_args[@]} -eq 0 ]; then
@@ -566,7 +570,17 @@ send_notifications() {
     fi
 
     if ! command -v apprise &> /dev/null; then
-        warning "Notifications configured but apprise is not installed (pip install apprise) - skipping"
+        warning "Notifications configured but apprise is not installed (pip install apprise)"
+        # Keep existing Slack webhook setups working until apprise is installed
+        if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            local text="$title"$'\n'"$body"
+            text=${text//\\/\\\\}
+            text=${text//\"/\\\"}
+            text=${text//$'\n'/\\n}
+            curl -fsS -X POST -H 'Content-type: application/json' \
+                --data "{\"text\":\"$text\"}" \
+                "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || warning "Slack webhook notification failed"
+        fi
         return 0
     fi
 
