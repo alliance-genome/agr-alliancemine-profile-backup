@@ -521,30 +521,61 @@ generate_report() {
     echo "" >> "$LOG_FILE"
 }
 
-# Send notifications (if configured)
+# Send notifications through Apprise (https://github.com/caronc/apprise).
+#   APPRISE_URLS       space-separated Apprise URLs (slack://, mailto://, msteams://, ...)
+#   APPRISE_CONFIG     path to an Apprise config file (TEXT or YAML)
+#   SLACK_WEBHOOK_URL  still honoured: Apprise accepts the raw Slack webhook URL
+# Notification URLs usually embed tokens: keep them in .env.local, not in git.
 send_notifications() {
     local status="$1"
     local filename="$2"
     local filesize="$3"
     local duration="$4"
-    
-    local message=""
+
+    local title body notify_type
     if [ "$status" = "success" ]; then
-        message="✅ PostgreSQL $BACKUP_TYPE backup completed successfully!\nFile: $filename ($filesize)\nDuration: ${duration}s\nDatabase: $DB_NAME on $DB_HOST"
+        notify_type="success"
+        title="PostgreSQL $BACKUP_TYPE backup completed"
+        body="File: $filename ($filesize)"$'\n'"Duration: ${duration}s"$'\n'"Database: $DB_NAME on $DB_HOST"
     else
-        message="❌ PostgreSQL $BACKUP_TYPE backup FAILED!\nDatabase: $DB_NAME on $DB_HOST\nCheck logs: $LOG_FILE"
+        notify_type="failure"
+        title="PostgreSQL $BACKUP_TYPE backup FAILED"
+        body="Database: $DB_NAME on $DB_HOST"$'\n'"Check logs: $LOG_FILE"
     fi
-    
-    # Slack notification
-    if [ -n "$SLACK_WEBHOOK_URL" ]; then
-        curl -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"$message\"}" \
-            "$SLACK_WEBHOOK_URL" 2>/dev/null || true
+
+    local -a targets=()
+    local -a config_args=()
+    if [ -n "${APPRISE_URLS:-}" ]; then
+        local -a urls
+        read -r -a urls <<< "$APPRISE_URLS"
+        targets+=("${urls[@]}")
     fi
-    
-    # Email notification
-    if [ -n "$EMAIL_RECIPIENT" ] && command -v mail &> /dev/null; then
-        echo -e "$message" | mail -s "PostgreSQL Backup $status - $BACKUP_TYPE" "$EMAIL_RECIPIENT" 2>/dev/null || true
+    if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+        targets+=("$SLACK_WEBHOOK_URL")
+    fi
+    if [ -n "${APPRISE_CONFIG:-}" ]; then
+        config_args=(--config "$APPRISE_CONFIG")
+    fi
+
+    if [ -n "${EMAIL_RECIPIENT:-}" ]; then
+        warning "EMAIL_RECIPIENT is no longer used; add a mailto:// URL to APPRISE_URLS instead"
+    fi
+
+    if [ ${#targets[@]} -eq 0 ] && [ ${#config_args[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    if ! command -v apprise &> /dev/null; then
+        warning "Notifications configured but apprise is not installed (pip install apprise) - skipping"
+        return 0
+    fi
+
+    # Output is discarded so notification URLs (which carry tokens) never reach the log.
+    if apprise --notification-type "$notify_type" --title "$title" --body "$body" \
+        ${config_args[@]+"${config_args[@]}"} ${targets[@]+"${targets[@]}"} >/dev/null 2>&1; then
+        info "Notification sent ($notify_type)"
+    else
+        warning "Notification delivery failed (run apprise manually with -vv to debug)"
     fi
 }
 
